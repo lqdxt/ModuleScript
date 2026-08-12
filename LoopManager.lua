@@ -429,52 +429,52 @@ function LoopManager.Resume(loopName: string, name: string)
  end
 end
 
-function LoopManager:RenderStepped(name: string, func: Callback, options: BindOptions?)
+function LoopManager.RenderStepped(name: string, func: Callback, options: BindOptions?)
  bind("RenderStepped", name, func, options)
 end
-function LoopManager:unRenderStepped(name: string)
+function LoopManager.unRenderStepped(name: string)
  unbind("RenderStepped", name)
 end
 
-function LoopManager:Heartbeat(name: string, func: Callback, options: BindOptions?)
+function LoopManager.Heartbeat(name: string, func: Callback, options: BindOptions?)
  bind("Heartbeat", name, func, options)
 end
-function LoopManager:unHeartbeat(name: string)
+function LoopManager.unHeartbeat(name: string)
  unbind("Heartbeat", name)
 end
 
-function LoopManager:Stepped(name: string, func: Callback, options: BindOptions?)
+function LoopManager.Stepped(name: string, func: Callback, options: BindOptions?)
  bind("Stepped", name, func, options)
 end
-function LoopManager:unStepped(name: string)
+function LoopManager.unStepped(name: string)
  unbind("Stepped", name)
 end
 
-function LoopManager:PreRender(name: string, func: Callback, options: BindOptions?)
+function LoopManager.PreRender(name: string, func: Callback, options: BindOptions?)
  bind("PreRender", name, func, options)
 end
-function LoopManager:unPreRender(name: string)
+function LoopManager.unPreRender(name: string)
  unbind("PreRender", name)
 end
 
-function LoopManager:PreAnimation(name: string, func: Callback, options: BindOptions?)
+function LoopManager.PreAnimation(name: string, func: Callback, options: BindOptions?)
  bind("PreAnimation", name, func, options)
 end
-function LoopManager:unPreAnimation(name: string)
+function LoopManager.unPreAnimation(name: string)
  unbind("PreAnimation", name)
 end
 
-function LoopManager:PreSimulation(name: string, func: Callback, options: BindOptions?)
+function LoopManager.PreSimulation(name: string, func: Callback, options: BindOptions?)
  bind("PreSimulation", name, func, options)
 end
-function LoopManager:unPreSimulation(name: string)
+function LoopManager.unPreSimulation(name: string)
  unbind("PreSimulation", name)
 end
 
-function LoopManager:PostSimulation(name: string, func: Callback, options: BindOptions?)
+function LoopManager.PostSimulation(name: string, func: Callback, options: BindOptions?)
  bind("PostSimulation", name, func, options)
 end
-function LoopManager:unPostSimulation(name: string)
+function LoopManager.unPostSimulation(name: string)
  unbind("PostSimulation", name)
 end
 
