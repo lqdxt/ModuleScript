@@ -108,6 +108,10 @@ local function unbind(loopName: string, name: string)
 end
 
 local function bind(loopName: string, name: string, func: Callback, options: BindOptions?)
+ if name == "" then
+  error("[LoopManager] Cannot bind: callback name must be a non-empty string.", 3)
+ end
+
  if typeof(loopName) ~= "string" then
   error(string.format("[LoopManager] Cannot bind: expected 'loopName' to be a string, got %s", typeof(loopName)), 3)
  end
@@ -268,10 +272,13 @@ local function Fire(loopName: string, ...: any)
 
  if loop.firing then
   if LoopManager.QueueReentrantFires then
-   loop.pendingFire = table.pack(...)
+   if not loop.pendingFire then
+    loop.pendingFire = {}
+   end
+   table.insert(loop.pendingFire, table.pack(...))
   else
    warn(string.format(
-    "[LoopManager] '%s' fired again before its previous tick finished (a bound callback likely yielded without YieldCheckEnabled); skipping this tick. Set LoopManager.QueueReentrantFires = true to coalesce reentrant fires instead of dropping them.",
+    "[LoopManager] '%s' fired again before its previous tick finished (a bound callback likely yielded without YieldCheckEnabled); skipping this tick. Set LoopManager.QueueReentrantFires = true to coalesce reentrant fires.",
     loopName
    ))
   end
@@ -288,8 +295,14 @@ local function Fire(loopName: string, ...: any)
    warn(string.format("[LoopManager] Internal error while firing '%s': %s", loopName, tostring(err)))
   end
 
-  args = loop.pendingFire
-  loop.pendingFire = nil
+  local nextArgs = nil
+  if loop.pendingFire and #loop.pendingFire > 0 then
+   nextArgs = table.remove(loop.pendingFire, 1)
+  else
+   nextArgs = nil
+   loop.pendingFire = nil
+  end
+  args = nextArgs
  until args == nil
 
  loop.firing = false
