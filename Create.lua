@@ -1,5 +1,12 @@
 local Create = {}
 Create.Objects = {}
+Create.SilentWarnings = true
+
+local function Warn(message)
+	if not Create.SilentWarnings then
+		warn(message)
+	end
+end
 
 local function build(className, registryName)
 	return function(properties)
@@ -14,7 +21,7 @@ local function build(className, registryName)
 						obj:SetAttribute(attrName, attrValue)
 					end)
 					if not ok then
-						warn(("Create: failed to set attribute '%s' on %s (%s)"):format(attrName, className, err))
+						Warn(("Create: failed to set attribute '%s' on %s (%s)"):format(attrName, className, err))
 					end
 				end
 			else
@@ -22,7 +29,7 @@ local function build(className, registryName)
 					obj[key] = value
 				end)
 				if not ok then
-					warn(("Create: failed to set '%s' on %s (%s)"):format(key, className, err))
+					Warn(("Create: failed to set '%s' on %s (%s)"):format(key, className, err))
 				end
 			end
 		end
@@ -33,7 +40,7 @@ local function build(className, registryName)
 
 		if registryName then
 			if Create.Objects[registryName] then
-				warn(("Create: '%s' already exists in Objects, overwriting"):format(registryName))
+				Warn(("Create: '%s' already exists in Objects, overwriting"):format(registryName))
 			end
 			Create.Objects[registryName] = obj
 		end
@@ -47,15 +54,15 @@ Create.new = build
 function Create.Get(name)
 	local obj = Create.Objects[name]
 	if not obj then
-		warn(("Create: no object registered under '%s'"):format(name))
+		Warn(("Create: no object registered under '%s'"):format(name))
 	end
 	return obj
 end
 
-function Create.Remove(name)
+function Create.Destroy(name)
 	local obj = Create.Objects[name]
 	if not obj then
-		warn(("Create: no object registered under '%s'"):format(name))
+		Warn(("Create: no object registered under '%s'"):format(name))
 		return
 	end
 	obj:Destroy()
