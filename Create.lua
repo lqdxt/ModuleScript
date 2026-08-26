@@ -29,6 +29,19 @@ const function build(className: string, registryName: string?): (properties: Pro
 						Warn(`Create: failed to set attribute '{attrName}' on {className} ({err})`)
 					end
 				end
+			elseif key == "Parent" then
+			elseif type(value) == "function" then
+				const signal = (obj :: any)[key]
+				if typeof(signal) == "RBXScriptSignal" then
+					const ok, err = pcall(function()
+						signal:Connect(value)
+					end)
+					if not ok then
+						Warn(`Create: failed to connect '{key}' on {className} ({err})`)
+					end
+				else
+					Warn(`Create: '{key}' is not a connectable event on {className}`)
+				end
 			else
 				const ok, err = pcall(function()
 					(obj :: any)[key] = value
