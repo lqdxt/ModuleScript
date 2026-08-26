@@ -1,46 +1,51 @@
-local Create = {}
-Create.Objects = {}
+--!strict
+
+type RegistryMap = { [string]: Instance }
+type PropertiesDict = { [any]: any }
+
+const Create = {}
+Create.Objects = {} :: RegistryMap
 Create.SilentWarnings = true
 
-local function Warn(message)
+const function Warn(message: string): ()
 	if not Create.SilentWarnings then
 		warn(message)
 	end
 end
 
-local function build(className, registryName)
-	return function(properties)
-		local obj = Instance.new(className)
+const function build(className: string, registryName: string?): (properties: PropertiesDict) -> Instance
+	return function(properties: PropertiesDict): Instance
+		const obj = Instance.new(className)
 
-		for key, value in pairs(properties) do
+		for key, value in properties do
 			if type(key) == "number" then
-				value.Parent = obj
+				(value :: Instance).Parent = obj
 			elseif key == "Attributes" then
-				for attrName, attrValue in pairs(value) do
-					local ok, err = pcall(function()
+				for attrName, attrValue in (value :: { [string]: any }) do
+					const ok, err = pcall(function()
 						obj:SetAttribute(attrName, attrValue)
 					end)
 					if not ok then
-						Warn(("Create: failed to set attribute '%s' on %s (%s)"):format(attrName, className, err))
+						Warn(`Create: failed to set attribute '{attrName}' on {className} ({err})`)
 					end
 				end
 			else
-				local ok, err = pcall(function()
-					obj[key] = value
+				const ok, err = pcall(function()
+					(obj :: any)[key] = value
 				end)
 				if not ok then
-					Warn(("Create: failed to set '%s' on %s (%s)"):format(key, className, err))
+					Warn(`Create: failed to set '{key}' on {className} ({err})`)
 				end
 			end
 		end
 
 		if properties.Parent then
-			obj.Parent = properties.Parent
+			obj.Parent = properties.Parent :: Instance
 		end
 
 		if registryName then
 			if Create.Objects[registryName] then
-				Warn(("Create: '%s' already exists in Objects, overwriting"):format(registryName))
+				Warn(`Create: '{registryName}' already exists in Objects, overwriting`)
 			end
 			Create.Objects[registryName] = obj
 		end
@@ -51,18 +56,18 @@ end
 
 Create.new = build
 
-function Create.Get(name)
-	local obj = Create.Objects[name]
+function Create.Get(name: string): Instance?
+	const obj: Instance? = Create.Objects[name]
 	if not obj then
-		Warn(("Create: no object registered under '%s'"):format(name))
+		Warn(`Create: no object registered under '{name}'`)
 	end
 	return obj
 end
 
-function Create.Destroy(name)
-	local obj = Create.Objects[name]
+function Create.Destroy(name: string): ()
+	const obj: Instance? = Create.Objects[name]
 	if not obj then
-		Warn(("Create: no object registered under '%s'"):format(name))
+		Warn(`Create: no object registered under '{name}'`)
 		return
 	end
 	obj:Destroy()
@@ -70,7 +75,7 @@ function Create.Destroy(name)
 end
 
 setmetatable(Create, {
-	__call = function(_, className, registryName)
+	__call = function(_: any, className: string, registryName: string?)
 		return build(className, registryName)
 	end,
 })
