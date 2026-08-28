@@ -28,6 +28,10 @@
    },
   },
  }
+ 
+ NOTE:
+ const by itself is a real keyword since feb
+ https://rfcs.luau.org/const-keyword.html
 ]]
 
 --!strict
