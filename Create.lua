@@ -1,3 +1,35 @@
+--[[
+ ModuleScript: 'Create' or your namings. put it in ReplicatedStorage
+
+ usage:
+
+ local x = Create("Folder") {
+  Name = "MyFolder",
+  Parent = workspace
+ }
+
+ if you dont want locals:
+
+ Create("Folder", "MyFolder) {...}
+
+ then use the Object table to access it
+
+ nested children:
+
+ Create("ScreenGui", "MainGui") {
+  Parent = playerGui,
+  Create("Frame", "MainFrame") {
+   Size = UDim2.new(0, 300, 0, 200),
+   BackgroundColor3 = Color3.new(1, 1, 1),
+   Create("UICorner") { CornerRadius = UDim.new(0, 8) },
+   Create("TextLabel", "Title") {
+    Text = "Hello",
+    Size = UDim2.new(1, 0, 0, 40),
+   },
+  },
+ }
+]]
+
 --!strict
 
 type RegistryMap = { [string]: Instance }
