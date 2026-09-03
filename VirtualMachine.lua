@@ -40,7 +40,7 @@ function PyList:remove(item)
    return
   end
  end
- error("ValueError: list.remove(x): x not in list")
+ error({type="Exception", value="ValueError: list.remove(x): x not in list"})
 end
 
 function PyList:get(idx)
@@ -51,6 +51,16 @@ end
 function PyList:set(idx, val)
  if idx < 0 then idx = #self._data + idx end
  self._data[idx + 1] = val
+end
+
+function PyList:__iter__()
+ local i = 0
+ local data = self._data
+ return function()
+  i = i + 1
+  if i <= #data then return data[i] end
+  error({type="Exception", value="StopIteration"})
+ end
 end
 
 function PyList:slice(start_idx, stop_idx, step)
@@ -124,6 +134,16 @@ function PyDict:items()
  return PyList.new(pairs_list)
 end
 
+function PyDict:__iter__()
+ local i = 0
+ local keys = self._keys
+ return function()
+  i = i + 1
+  if i <= #keys then return keys[i] end
+  error({type="Exception", value="StopIteration"})
+ end
+end
+
 function PyDict:__tostring()
  local parts = {}
  for _, k in ipairs(self._keys) do
@@ -144,6 +164,16 @@ end
 function PyTuple:get(idx)
  if idx < 0 then idx = #self._data + idx end
  return self._data[idx + 1]
+end
+
+function PyTuple:__iter__()
+ local i = 0
+ local data = self._data
+ return function()
+  i = i + 1
+  if i <= #data then return data[i] end
+  error({type="Exception", value="StopIteration"})
+ end
 end
 
 function PyTuple:__tostring()
@@ -182,7 +212,11 @@ function PyInstance.new(cls, args, kwargs)
  local inst = setmetatable({ __class__ = cls, __dict__ = {} }, PyInstance)
  local init = cls:lookup("__init__")
  if init then
-  init(inst, (table.unpack or unpack)(args or {}))
+  if init.__is_python_fn then
+   init({args=args or {}, kwargs=kwargs or {}, star_args=nil, dstar_args=nil})
+  else
+   init(inst, (table.unpack or unpack)(args or {}))
+  end
  end
  return inst
 end
@@ -215,7 +249,13 @@ local Env = {}
 Env.__index = Env
 
 function Env.new(parent)
- return setmetatable({ vars = {}, parent = parent, globals = parent and parent.globals or nil, globals_flag = {} }, Env)
+ return setmetatable({ 
+  vars = {}, 
+  parent = parent, 
+  globals = parent and parent.globals or nil, 
+  globals_flag = {},
+  nonlocal_flag = {}
+ }, Env)
 end
 
 function Env:get(name)
@@ -228,8 +268,20 @@ function Env:get(name)
 end
 
 function Env:set(name, val)
- if self.globals_flag and self.globals_flag[name] and self.globals then
-  self.globals.vars[name] = val
+ if self.nonlocal_flag and self.nonlocal_flag[name] then
+  local p = self.parent
+  while p do
+   if p.vars[name] ~= nil then
+    p.vars[name] = val
+    return
+   end
+   p = p.parent
+  end
+  self.vars[name] = val
+ elseif self.globals_flag and self.globals_flag[name] then
+  local g = self
+  while g.parent do g = g.parent end
+  g.vars[name] = val
  else
   self.vars[name] = val
  end
@@ -241,7 +293,8 @@ local KEYWORDS = {
  ["or"]=true, ["return"]=true, ["import"]=true, ["from"]=true, ["as"]=true,
  ["try"]=true, ["except"]=true, ["finally"]=true, ["raise"]=true, ["pass"]=true,
  ["break"]=true, ["continue"]=true, ["lambda"]=true, ["True"]=true, ["False"]=true,
- ["None"]=true, ["is"]=true, ["global"]=true
+ ["None"]=true, ["is"]=true, ["global"]=true, ["nonlocal"]=true, ["yield"]=true,
+ ["async"]=true, ["await"]=true, ["with"]=true
 }
 
 local function tokenize(code)
@@ -278,6 +331,9 @@ local function tokenize(code)
      pos = pos + 1
     elseif c == "#" then
      break
+    elseif c == "@" then
+     table.insert(tokens, { type = "DELIMITER", value = "@", line = line_idx })
+     pos = pos + 1
     elseif string.match(line, "^f[\"']", pos) then
      local quote = string.sub(line, pos + 1, pos + 1)
      local e = string.find(line, quote, pos + 2, true)
@@ -372,8 +428,23 @@ local function parse_and_eval(tokens, env)
   if mt == PyInstance then
    local m = obj.__class__:lookup(method)
    if m then return m(obj, ...) end
+  elseif mt == PyList or mt == PyDict or mt == PyTuple then
+   if mt[method] then return mt[method](obj, ...) end
   end
   return nil
+ end
+
+ local function is_instance(obj, cls)
+  if not obj or not cls then return false end
+  if getmetatable(obj) == PyInstance then
+   local c = obj.__class__
+   while c do
+    if c == cls then return true end
+    if not c.__bases__ or #c.__bases__ == 0 then break end
+    c = c.__bases__[1]
+   end
+  end
+  return false
  end
 
  local eval_expr
@@ -549,6 +620,16 @@ local function parse_and_eval(tokens, env)
   if match("KEYWORD", "True") then return true end
   if match("KEYWORD", "False") then return false end
   if match("KEYWORD", "None") then return nil end
+  if match("KEYWORD", "yield") then
+   local val = nil
+   if peek() and peek().type ~= "NEWLINE" and peek().type ~= "DEDENT" and peek().type ~= "DELIMITER" and peek().value ~= ")" then
+    val = eval_expr()
+   end
+   return coroutine.yield(val)
+  end
+  if match("KEYWORD", "await") then
+   return eval_expr()
+  end
 
   if match("NAME") then
    local var_name = t.value
@@ -556,28 +637,147 @@ local function parse_and_eval(tokens, env)
   end
 
   if match("DELIMITER", "[") then
-   local items = {}
-   if not match("DELIMITER", "]") then
-    repeat
-     table.insert(items, eval_expr())
-    until not match("DELIMITER", ",")
-    match("DELIMITER", "]")
+   local start_pos = pos
+   local items_toks = {}
+   local depth = 0
+   local is_comp = false
+   while pos <= #tokens do
+    local curr_t = tokens[pos]
+    if curr_t.type == "DELIMITER" and (curr_t.value == "[" or curr_t.value == "(" or curr_t.value == "{") then depth = depth + 1 end
+    if curr_t.type == "DELIMITER" and (curr_t.value == "]" or curr_t.value == ")" or curr_t.value == "}") then
+     if depth == 0 then break end
+     depth = depth - 1
+    end
+    if depth == 0 and curr_t.type == "KEYWORD" and curr_t.value == "for" then
+     is_comp = true
+     break
+    end
+    table.insert(items_toks, curr_t)
+    pos = pos + 1
    end
-   return PyList.new(items)
+
+   if is_comp then
+    local expr_toks = items_toks
+    match("KEYWORD", "for")
+    local comp_var = match("NAME").value
+    match("KEYWORD", "in")
+    local comp_iter = eval_expr()
+    local comp_cond = nil
+    if match("KEYWORD", "if") then
+     comp_cond = parse_expr_tokens()
+    end
+    match("DELIMITER", "]")
+
+    local res = {}
+    local iter_data = comp_iter and comp_iter._data or {}
+    for _, item in ipairs(iter_data) do
+     env:set(comp_var, item)
+     local pass = true
+     if comp_cond then pass = parse_and_eval(comp_cond, env) end
+     if pass then
+      table.insert(res, parse_and_eval(expr_toks, env))
+     end
+    end
+    return PyList.new(res)
+   else
+    pos = start_pos
+    local items = {}
+    if not match("DELIMITER", "]") then
+     repeat
+      table.insert(items, eval_expr())
+     until not match("DELIMITER", ",")
+     match("DELIMITER", "]")
+    end
+    return PyList.new(items)
+   end
   end
 
   if match("DELIMITER", "{") then
-   local dict_data = {}
-   if not match("DELIMITER", "}") then
-    repeat
-     local k = eval_expr()
-     match("DELIMITER", ":")
-     local v = eval_expr()
-     dict_data[k] = v
-    until not match("DELIMITER", ",")
-    match("DELIMITER", "}")
+   local start_pos = pos
+   local items_toks = {}
+   local depth = 0
+   local is_comp = false
+   while pos <= #tokens do
+    local curr_t = tokens[pos]
+    if curr_t.type == "DELIMITER" and (curr_t.value == "[" or curr_t.value == "(" or curr_t.value == "{") then depth = depth + 1 end
+    if curr_t.type == "DELIMITER" and (curr_t.value == "]" or curr_t.value == ")" or curr_t.value == "}") then
+     if depth == 0 then break end
+     depth = depth - 1
+    end
+    if depth == 0 and curr_t.type == "KEYWORD" and curr_t.value == "for" then
+     is_comp = true
+     break
+    end
+    table.insert(items_toks, curr_t)
+    pos = pos + 1
    end
-   return PyDict.new(dict_data)
+
+   if is_comp then
+    local expr_toks = items_toks
+    match("KEYWORD", "for")
+    local comp_var = match("NAME").value
+    match("KEYWORD", "in")
+    local comp_iter = eval_expr()
+    local comp_cond = nil
+    if match("KEYWORD", "if") then
+     comp_cond = parse_expr_tokens()
+    end
+    match("DELIMITER", "}")
+
+    local is_dict = false
+    for _, tok in ipairs(expr_toks) do
+     if tok.type == "DELIMITER" and tok.value == ":" then is_dict = true break end
+    end
+
+    if is_dict then
+     local res = PyDict.new()
+     local iter_data = comp_iter and comp_iter._data or {}
+     for _, item in ipairs(iter_data) do
+      env:set(comp_var, item)
+      local pass = true
+      if comp_cond then pass = parse_and_eval(comp_cond, env) end
+      if pass then
+       local k_toks = {}
+       local v_toks = {}
+       local past_colon = false
+       for _, tok in ipairs(expr_toks) do
+        if tok.type == "DELIMITER" and tok.value == ":" then past_colon = true
+        elseif past_colon then table.insert(v_toks, tok)
+        else table.insert(k_toks, tok) end
+       end
+       local k = parse_and_eval(k_toks, env)
+       local v = parse_and_eval(v_toks, env)
+       res:set(k, v)
+      end
+     end
+     return res
+    else
+     local res = {}
+     local iter_data = comp_iter and comp_iter._data or {}
+     for _, item in ipairs(iter_data) do
+      env:set(comp_var, item)
+      local pass = true
+      if comp_cond then pass = parse_and_eval(comp_cond, env) end
+      if pass then
+       table.insert(res, parse_and_eval(expr_toks, env))
+      end
+     end
+     return PyList.new(res)
+    end
+   else
+    pos = start_pos
+    local dict_data = {}
+    if not match("DELIMITER", "}") then
+     repeat
+      local k = eval_expr()
+      match("DELIMITER", ":")
+      local v = eval_expr()
+      dict_data[k] = v
+     until not match("DELIMITER", ",")
+     match("DELIMITER", "}")
+    end
+    return PyDict.new(dict_data)
+   end
   end
 
   if match("DELIMITER", "(") then
@@ -595,8 +795,8 @@ local function parse_and_eval(tokens, env)
     match("DELIMITER", ":")
    end
    local body_toks = parse_expr_tokens()
-   return function(...)
-    local args = {...}
+   return function(call_data)
+    local args = call_data.args or {}
     local fn_env = Env.new(env)
     for i, p in ipairs(params) do fn_env:set(p, args[i]) end
     local ok, res = pcall(parse_and_eval, body_toks, fn_env)
@@ -615,17 +815,49 @@ local function parse_and_eval(tokens, env)
   while true do
    if match("DELIMITER", "(") then
     local args = {}
+    local kwargs = {}
+    local star_args = nil
+    local dstar_args = nil
     if not match("DELIMITER", ")") then
-     repeat
-      table.insert(args, eval_expr())
-     until not match("DELIMITER", ",")
+     while true do
+      if match("OPERATOR", "*") then
+       star_args = eval_expr()
+      elseif match("OPERATOR", "**") then
+       dstar_args = eval_expr()
+      else
+       local name_tok = peek()
+       if name_tok and name_tok.type == "NAME" then
+        local next_tok = peek(1)
+        if next_tok and next_tok.type == "OPERATOR" and next_tok.value == "=" then
+         match("NAME")
+         match("OPERATOR", "=")
+         local val = eval_expr()
+         kwargs[name_tok.value] = val
+        else
+         table.insert(args, eval_expr())
+        end
+       else
+        table.insert(args, eval_expr())
+       end
+      end
+      if not match("DELIMITER", ",") then break end
+     end
      match("DELIMITER", ")")
     end
 
     if type(left) == "function" then
-     left = left((table.unpack or unpack)(args))
+     if left.__is_python_fn then
+      left = left({args=args, kwargs=kwargs, star_args=star_args, dstar_args=dstar_args})
+     else
+      local final_args = {}
+      for _, v in ipairs(args) do table.insert(final_args, v) end
+      if star_args and star_args._data then
+       for _, v in ipairs(star_args._data) do table.insert(final_args, v) end
+      end
+      left = left((table.unpack or unpack)(final_args))
+     end
     elseif getmetatable(left) == PyClass then
-     left = PyInstance.new(left, args)
+     left = PyInstance.new(left, args, kwargs)
     end
    elseif match("DELIMITER", ".") then
     local attr_tok = match("NAME")
@@ -655,8 +887,6 @@ local function parse_and_eval(tokens, env)
       local str_methods = {
        upper = string.upper, lower = string.lower,
        strip = function(s) return string.match(s, "^%s*(.-)%s*$") end,
-       lstrip = function(s) return string.match(s, "^%s*(.-)$") end,
-       rstrip = function(s) return string.match(s, "^(.-)%s*$") end,
        split = function(s, sep)
         local res = {}
         sep = sep or "%s+"
@@ -666,12 +896,7 @@ local function parse_and_eval(tokens, env)
        replace = function(s, old, new) return (string.gsub(s, old, new)) end,
        startswith = function(s, prefix) return string.sub(s, 1, #prefix) == prefix end,
        endswith = function(s, suffix) return string.sub(s, -#suffix) == suffix end,
-       find = function(s, sub) local i = string.find(s, sub, 1, true) return i and i - 1 or -1 end,
-       format = function(s, ...)
-        local args = {...}
-        local i = 0
-        return (string.gsub(s, "{}", function() i = i + 1 return tostring(args[i]) end))
-       end
+       find = function(s, sub) local i = string.find(s, sub, 1, true) return i and i - 1 or -1 end
       }
       if str_methods[attr] and peek() and peek().type == "DELIMITER" and peek().value == "(" then
        is_method = true
@@ -782,40 +1007,157 @@ local function parse_and_eval(tokens, env)
   return block_tokens
  end
 
+ local function bind_args(params, defaults, vararg, kwarg, args, kwargs, star_args, dstar_args)
+  local bound = {}
+  local arg_idx = 1
+
+  local expanded_args = {}
+  for _, v in ipairs(args) do table.insert(expanded_args, v) end
+  if star_args and star_args._data then
+   for _, v in ipairs(star_args._data) do table.insert(expanded_args, v) end
+  end
+
+  local expanded_kwargs = {}
+  for k, v in pairs(kwargs) do expanded_kwargs[k] = v end
+  if dstar_args and dstar_args._data then
+   for _, k in ipairs(dstar_args._keys) do
+    expanded_kwargs[k] = dstar_args._data[k]
+   end
+  end
+
+  for i, p in ipairs(params) do
+   if expanded_kwargs[p] ~= nil then
+    bound[p] = expanded_kwargs[p]
+    expanded_kwargs[p] = nil
+   elseif arg_idx <= #expanded_args then
+    bound[p] = expanded_args[arg_idx]
+    arg_idx = arg_idx + 1
+   elseif defaults[p] ~= nil then
+    bound[p] = defaults[p]
+   else
+    error({type="Exception", value="TypeError: missing required argument: " .. tostring(p)})
+   end
+  end
+
+  if vararg then
+   local vargs = {}
+   for i = arg_idx, #expanded_args do table.insert(vargs, expanded_args[i]) end
+   bound[vararg] = PyTuple.new(vargs)
+  end
+
+  if kwarg then
+   local kw = PyDict.new()
+   for k, v in pairs(expanded_kwargs) do kw:set(k, v) end
+   bound[kwarg] = kw
+  end
+
+  return bound
+ end
+
  local last_val = nil
 
  while pos <= #tokens do
   local t = peek()
 
+  local decorators = {}
+  while match("DELIMITER", "@") do
+   table.insert(decorators, eval_expr())
+   match("NEWLINE")
+  end
+
+  if match("KEYWORD", "async") and match("KEYWORD", "def") then
+  end
+
   if match("KEYWORD", "def") then
    local fn_name = match("NAME").value
    match("DELIMITER", "(")
    local params = {}
+   local defaults = {}
+   local vararg = nil
+   local kwarg = nil
    if not match("DELIMITER", ")") then
-    repeat
-     table.insert(params, match("NAME").value)
-    until not match("DELIMITER", ",")
+    while true do
+     if match("OPERATOR", "*") then
+      if peek() and peek().type == "DELIMITER" and peek().value == "," then
+       match("DELIMITER", ",")
+      else
+       vararg = match("NAME").value
+       if not match("DELIMITER", ",") then break end
+      end
+     elseif match("OPERATOR", "**") then
+      kwarg = match("NAME").value
+      if not match("DELIMITER", ",") then break end
+     else
+      local pname = match("NAME").value
+      table.insert(params, pname)
+      if match("OPERATOR", "=") then
+       defaults[pname] = eval_expr()
+      end
+      if not match("DELIMITER", ",") then break end
+     end
+    end
     match("DELIMITER", ")")
    end
    match("DELIMITER", ":")
    local body = eval_block()
 
-   env:set(fn_name, function(...)
-    local args = { ... }
+   local has_yield = false
+   for _, tok in ipairs(body) do
+    if tok.type == "KEYWORD" and tok.value == "yield" then
+     has_yield = true
+     break
+    end
+   end
+
+   local fn_impl = function(call_data)
+    local args = call_data.args or {}
+    local kwargs = call_data.kwargs or {}
+    local star_args = call_data.star_args
+    local dstar_args = call_data.dstar_args
+
     local fn_env = Env.new(env)
-    for i, p in ipairs(params) do
-     fn_env:set(p, args[i])
+    local bound = bind_args(params, defaults, vararg, kwarg, args, kwargs, star_args, dstar_args)
+    for k, v in pairs(bound) do
+     fn_env:set(k, v)
     end
-    local ok, res = pcall(parse_and_eval, body, fn_env)
-    if not ok then
-     if type(res) == "table" and res.type == ReturnSignal then
-      return res.value
-     else
-      error(res)
+
+    if has_yield then
+     local co = coroutine.create(function()
+      local ok, res = pcall(parse_and_eval, body, fn_env)
+      if not ok then error(res) end
+      return res
+     end)
+     return {
+      __class__ = env:get("Generator") or env:get("Exception"),
+      __next__ = function()
+       local ok, val = coroutine.resume(co)
+       if not ok then error(val) end
+       if coroutine.status(co) == "dead" then
+        error({type="Exception", value="StopIteration"})
+       end
+       return val
+      end,
+      __iter__ = function(self) return self.__next__ end
+     }
+    else
+     local ok, res = pcall(parse_and_eval, body, fn_env)
+     if not ok then
+      if type(res) == "table" and res.type == ReturnSignal then
+       return res.value
+      else
+       error(res)
+      end
      end
+     return res
     end
-    return res
-   end)
+   end
+   fn_impl.__is_python_fn = true
+
+   local final_fn = fn_impl
+   for i = #decorators, 1, -1 do
+    final_fn = decorators[i]({args={final_fn}, kwargs={}, star_args=nil, dstar_args=nil})
+   end
+   env:set(fn_name, final_fn)
 
   elseif match("KEYWORD", "class") then
    local class_name = match("NAME").value
@@ -834,7 +1176,11 @@ local function parse_and_eval(tokens, env)
    parse_and_eval(body, class_env)
 
    local cls = PyClass.new(class_name, bases, class_env.vars)
-   env:set(class_name, cls)
+   local final_cls = cls
+   for i = #decorators, 1, -1 do
+    final_cls = decorators[i]({args={final_cls}, kwargs={}, star_args=nil, dstar_args=nil})
+   end
+   env:set(class_name, final_cls)
 
   elseif match("KEYWORD", "if") then
    local cond = eval_expr()
@@ -892,7 +1238,36 @@ local function parse_and_eval(tokens, env)
    local body = eval_block()
 
    local iterable = parse_and_eval(iter_toks, env)
-   if iterable and iterable._data then
+   local iter_func = call_magic(iterable, "__iter__")
+
+   if not iter_func and type(iterable) == "string" then
+    local i = 0
+    local str = iterable
+    iter_func = function()
+     i = i + 1
+     if i <= #str then return string.sub(str, i, i) end
+     error({type="Exception", value="StopIteration"})
+    end
+   end
+
+   if iter_func then
+    while true do
+     local ok, item = pcall(iter_func)
+     if not ok then
+      if type(item) == "table" and item.value == "StopIteration" then break end
+      error(item)
+     end
+     env:set(var_name, item)
+     local ok2, res = pcall(parse_and_eval, body, env)
+     if not ok2 then
+      if res == BreakSignal then break
+      elseif res == ContinueSignal then
+      else error(res) end
+     else
+      last_val = res
+     end
+    end
+   elseif iterable and iterable._data then
     for _, item in ipairs(iterable._data) do
      env:set(var_name, item)
      local ok, res = pcall(parse_and_eval, body, env)
@@ -904,36 +1279,49 @@ local function parse_and_eval(tokens, env)
       last_val = res
      end
     end
-   elseif type(iterable) == "string" then
-    for i = 1, #iterable do
-     env:set(var_name, string.sub(iterable, i, i))
-     local ok, res = pcall(parse_and_eval, body, env)
-     if not ok then
-      if res == BreakSignal then break
-      elseif res == ContinueSignal then
-      else error(res) end
-     else
-      last_val = res
-     end
-    end
+   end
+
+  elseif match("KEYWORD", "with") then
+   local ctx = eval_expr()
+   local var_name = nil
+   if match("KEYWORD", "as") then
+    var_name = match("NAME").value
+   end
+   match("DELIMITER", ":")
+   local body = eval_block()
+
+   local enter = call_magic(ctx, "__enter__")
+   if var_name then env:set(var_name, enter) end
+
+   local ok, res = pcall(parse_and_eval, body, env)
+
+   local exc_type, exc_val = nil, nil
+   if not ok then
+    exc_val = res
+    exc_type = type(res)
+   end
+
+   local exit = call_magic(ctx, "__exit__", exc_type, exc_val, nil)
+   if not ok and not exit then
+    error(res)
    end
 
   elseif match("KEYWORD", "try") then
    match("DELIMITER", ":")
    local try_body = eval_block()
    local except_blocks = {}
-   while match("KEYWORD", "except") do
-    local exc_type = nil
+   while match("KEYWORD", "except") then
+    local exc_class = nil
     local exc_var = nil
     if match("NAME") then
-     exc_type = t.value
+     exc_class = env:get(t.value)
      if match("KEYWORD", "as") then
       exc_var = match("NAME").value
      end
     end
     match("DELIMITER", ":")
     local exc_body = eval_block()
-    table.insert(except_blocks, {type=exc_type, var=exc_var, body=exc_body})
+    table.insert(except_blocks, {class=exc_class, var=exc_var, body=exc_body})
    end
    local finally_body = nil
    if match("KEYWORD", "finally") then
@@ -945,8 +1333,17 @@ local function parse_and_eval(tokens, env)
    if not ok then
     local handled = false
     for _, exc in ipairs(except_blocks) do
-     if exc.type == nil or (type(res) == "table" and res.value == exc.type) then
-      if exc.var then env:set(exc_var, res) end
+     local catch_it = false
+     if exc.class == nil then
+      catch_it = true
+     elseif type(res) == "table" and res.is_obj and is_instance(res.value, exc.class) then
+      catch_it = true
+     elseif type(res) == "table" and res.is_str and exc.class == global_env:get("Exception") then
+      catch_it = true
+     end
+
+     if catch_it then
+      if exc.var then env:set(exc.var, res) end
       local ok2, res2 = pcall(parse_and_eval, exc.body, env)
       if not ok2 then error(res2) end
       last_val = res2
@@ -976,6 +1373,11 @@ local function parse_and_eval(tokens, env)
    env.globals_flag = env.globals_flag or {}
    env.globals_flag[var_name] = true
 
+  elseif match("KEYWORD", "nonlocal") then
+   local var_name = match("NAME").value
+   env.nonlocal_flag = env.nonlocal_flag or {}
+   env.nonlocal_flag[var_name] = true
+
   elseif match("KEYWORD", "break") then
    error(BreakSignal)
 
@@ -988,10 +1390,13 @@ local function parse_and_eval(tokens, env)
 
   elseif match("KEYWORD", "raise") then
    local exc = eval_expr()
-   error({type="Exception", value=exc})
+   if type(exc) == "string" then
+    error({type="Exception", value=exc, is_str=true})
+   else
+    error({type="Exception", value=exc, is_obj=true})
+   end
 
   elseif match("KEYWORD", "pass") then
-
   elseif match("NAME") then
    local var_name = t.value
    if match("OPERATOR", "=") then
@@ -1106,14 +1511,25 @@ global_env:set("super", function(inst)
  return inst.__class__.__bases__[1]
 end)
 
-function call_magic(obj, method, ...)
- local mt = getmetatable(obj)
- if mt == PyInstance then
-  local m = obj.__class__:lookup(method)
-  if m then return m(obj, ...) end
- end
- return nil
+local function make_exc_class(name, base)
+ local cls = PyClass.new(name, base and {base} or {}, {
+  __init__ = function(self, msg) self.__dict__.message = msg or "" end,
+  __str__ = function(self) return self.__dict__.message end
+ })
+ return cls
 end
+
+local Exception = make_exc_class("Exception", nil)
+global_env:set("Exception", Exception)
+global_env:set("ValueError", make_exc_class("ValueError", Exception))
+global_env:set("TypeError", make_exc_class("TypeError", Exception))
+global_env:set("IndexError", make_exc_class("IndexError", Exception))
+global_env:set("KeyError", make_exc_class("KeyError", Exception))
+global_env:set("AttributeError", make_exc_class("AttributeError", Exception))
+global_env:set("StopIteration", make_exc_class("StopIteration", Exception))
+global_env:set("RuntimeError", make_exc_class("RuntimeError", Exception))
+global_env:set("ZeroDivisionError", make_exc_class("ZeroDivisionError", Exception))
+global_env:set("Generator", PyClass.new("Generator", {}, {}))
 
 function VM:GetOrLoadModule(modName)
  if self.loaded_modules[modName] then
