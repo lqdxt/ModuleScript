@@ -19,8 +19,10 @@ export type TerrainData = {
  isEmpty: boolean,
 }
 
---- @param resolution number? optional step size in studs (default: auto-calculated for optimal speed)
---- @param ignoreWater boolean? whether raycasts ignore water bodies (default: true)
+--- calculates and returns the extents, position, surface angles, and slope data of the active terrain
+--- @param 1. resolution number? optional step size in studs (default: auto-calculated for optimal speed)
+--- @param 2. ignoreWater boolean? whether raycasts ignore water bodies (default: true)
+--- @return TerrainData table containing spatial measurements and slope statistics
 function GetTerrain(resolution: number?, ignoreWater: boolean?): TerrainData
  local skipWater = if ignoreWater ~= nil then ignoreWater else true
 
