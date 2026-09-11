@@ -11,7 +11,7 @@
  print(data.slopes.average) <-- average slope in degrees
  print(data.slopes.min, data.slopes.max)
 
- -- query slope at a specific point:
+ - query slope at a specific point: -
  local slopeDeg, normal, groundY = data.slopes.get_slope_at(120, -340)
 ]]
 --!strict
