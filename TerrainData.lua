@@ -1,5 +1,21 @@
+--[[
+ save it as a ModuleScript, preferably in ReplicatedStorage
+
+ usage:
+
+ local GetTerrain = require(game.ReplicatedStorage.TerrainData)
+ local data = GetTerrain() <-- uses defaults: auto resolution, ignores water
+
+ print(data.size) <-- Vector3 bounding size
+ print(data.position) <-- center of the terrain
+ print(data.slopes.average) <-- average slope in degrees
+ print(data.slopes.min, data.slopes.max)
+
+ -- query slope at a specific point:
+ local slopeDeg, normal, groundY = data.slopes.get_slope_at(120, -340)
+]]
 --!strict
-local Terrain = workspace.Terrain
+const Terrain = workspace.Terrain
 
 export type TerrainData = {
  size: Vector3,
@@ -14,53 +30,83 @@ export type TerrainData = {
   average: number,
   min: number,
   max: number,
-  getSlopeAt: (x: number, z: number) -> (number, Vector3, number?),
+  get_slope_at: (x: number, z: number) -> (number, Vector3, number?),
  },
- isEmpty: boolean,
+ empty: boolean,
 }
 
---- calculates and returns the extents, position, surface angles, and slope data of the active terrain
---- @param 1. resolution number? optional step size in studs (default: auto-calculated for optimal speed)
---- @param 2. ignoreWater boolean? whether raycasts ignore water bodies (default: true)
---- @return TerrainData table containing spatial measurements and slope statistics
-function GetTerrain(resolution: number?, ignoreWater: boolean?): TerrainData
- local skipWater = if ignoreWater ~= nil then ignoreWater else true
+const MAX_SAMPLES: number = 4096
+const YIELD_EVERY: number = 200
 
- local maxExtents = Terrain.MaxExtents
- local minExtentsStuds = Vector3.new(maxExtents.Min.X * 4, maxExtents.Min.Y * 4, maxExtents.Min.Z * 4)
- local maxExtentsStuds = Vector3.new(maxExtents.Max.X * 4, maxExtents.Max.Y * 4, maxExtents.Max.Z * 4)
+--- @param resolution: optional size in studs
+--- @param ignoreWater: whether raycasts ignore water bodies
+--- @param region: scan just your terrain's extents instead of Terrain.MaxExtents
+--- @return TerrainData table containing measurements and slope statistics
+const function GetTerrain(resolution: number?, ignoreWater: boolean?, region: { min: Vector3, max: Vector3 }?): TerrainData
+ const skipWater: boolean = if ignoreWater ~= nil then ignoreWater else true
+ if resolution ~= nil and resolution <= 0 then error("resolution must be a positive number") end
 
- local spanX = maxExtentsStuds.X - minExtentsStuds.X
- local spanZ = maxExtentsStuds.Z - minExtentsStuds.Z
+ local minExStuds: Vector3
+ local maxExStuds: Vector3
 
- local step = resolution or math.clamp(math.max(spanX, spanZ) / 50, 8, 64)
+ if region then
+  minExStuds = region.min
+  maxExStuds = region.max
+ else
+  const maxExtents: Region3int16 = Terrain.MaxExtents
+  minExStuds = Vector3.new(maxExtents.Min.X * 4, maxExtents.Min.Y * 4, maxExtents.Min.Z * 4)
+  maxExStuds = Vector3.new(maxExtents.Max.X * 4, maxExtents.Max.Y * 4, maxExtents.Max.Z * 4)
+ end
 
- local raycastParams = RaycastParams.new()
- raycastParams.FilterType = Enum.RaycastFilterType.Include
- raycastParams.FilterDescendantsInstances = { Terrain }
- raycastParams.IgnoreWater = skipWater
+ const spanX: number = maxExStuds.X - minExStuds.X
+ const spanZ: number = maxExStuds.Z - minExStuds.Z
 
- local rayStartY = maxExtentsStuds.Y + 100
- local rayDistance = (maxExtentsStuds.Y - minExtentsStuds.Y) + 200
+ local step: number = resolution or math.clamp(math.max(spanX, spanZ) / 50, 8, 64)
 
- local minX, minY, minZ = math.huge, math.huge, math.huge
- local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
+ const gridX: number = math.floor(spanX / step) + 1
+ const gridZ: number = math.floor(spanZ / step) + 1
+ if gridX * gridZ > MAX_SAMPLES then
+  const scale: number = math.sqrt((gridX * gridZ) / MAX_SAMPLES)
+  step *= scale
+ end
 
- local totalSlope = 0
- local minSlope = 90
- local maxSlope = 0
- local sampledCount = 0
- local sumNormal = Vector3.zero
+ const params: RaycastParams = RaycastParams.new()
+ params.FilterType = Enum.RaycastFilterType.Include
+ params.FilterDescendantsInstances = { Terrain }
+ params.IgnoreWater = skipWater
 
- for x = minExtentsStuds.X, maxExtentsStuds.X, step do
-  for z = minExtentsStuds.Z, maxExtentsStuds.Z, step do
-   local origin = Vector3.new(x, rayStartY, z)
-   local direction = Vector3.new(0, -rayDistance, 0)
+ const rStartY: number = maxExStuds.Y + 100
+ const rDist: number = (maxExStuds.Y - minExStuds.Y) + 200
 
-   local hit = workspace:Raycast(origin, direction, raycastParams)
+ local minX: number, minY: number, minZ: number = math.huge, math.huge, math.huge
+ local maxX: number, maxY: number, maxZ: number = -math.huge, -math.huge, -math.huge
+
+ local totalSlope: number = 0
+ local minSlope: number = 90
+ local maxSlope: number = 0
+ local sampCount: number = 0
+ local sumNormal: Vector3 = Vector3.zero
+ local raysFired: number = 0
+
+ for x: number = minExStuds.X, maxExStuds.X, step do
+  for z: number = minExStuds.Z, maxExStuds.Z, step do
+   const origin: Vector3 = Vector3.new(x, rStartY, z)
+   const direction: Vector3 = Vector3.new(0, -rDist, 0)
+
+   const hit: {
+    Distance: number,
+    Instance: BasePart,
+    Material: Enum.Material,
+    Normal: Vector3,
+    Position: Vector3
+   }? = workspace:Raycast(origin, direction, params)
+   raysFired += 1
+   if raysFired % YIELD_EVERY == 0 then
+    task.wait()
+   end
    if hit then
-    local pos = hit.Position
-    local normal = hit.Normal
+    const pos: Vector3 = hit.Position
+    const normal: Vector3 = hit.Normal
 
     minX = math.min(minX, pos.X)
     minY = math.min(minY, pos.Y)
@@ -70,19 +116,19 @@ function GetTerrain(resolution: number?, ignoreWater: boolean?): TerrainData
     maxY = math.max(maxY, pos.Y)
     maxZ = math.max(maxZ, pos.Z)
 
-    local dot = math.clamp(normal:Dot(Vector3.yAxis), -1, 1)
-    local slopeDeg = math.deg(math.acos(dot))
+    const dot: number = math.clamp(normal:Dot(Vector3.yAxis), -1, 1)
+    const slopeDeg: number = math.deg(math.acos(dot))
 
     minSlope = math.min(minSlope, slopeDeg)
     maxSlope = math.max(maxSlope, slopeDeg)
     totalSlope += slopeDeg
     sumNormal += normal
-    sampledCount += 1
+    sampCount += 1
    end
   end
  end
 
- if sampledCount == 0 then
+ if sampCount == 0 then
   return {
    size = Vector3.zero,
    position = Vector3.zero,
@@ -93,41 +139,47 @@ function GetTerrain(resolution: number?, ignoreWater: boolean?): TerrainData
     average = 0,
     min = 0,
     max = 0,
-    getSlopeAt = function(x: number, z: number)
+    get_slope_at = function(x: number, z: number)
      return 0, Vector3.yAxis, nil
     end,
    },
-   isEmpty = true,
+   empty = true,
   }
  end
 
- local minBound = Vector3.new(minX, minY, minZ)
- local maxBound = Vector3.new(maxX, maxY, maxZ)
- local size = maxBound - minBound
- local position = (minBound + maxBound) / 2
+ const minBound: Vector3 = Vector3.new(minX, minY, minZ)
+ const maxBound: Vector3 = Vector3.new(maxX, maxY, maxZ)
+ const size: Vector3 = maxBound - minBound
+ const position: Vector3 = (minBound + maxBound) / 2
 
- local avgNormal = sumNormal.Magnitude > 0 and sumNormal.Unit or Vector3.yAxis
+ const avgNormal: Vector3 = sumNormal.Magnitude > 0 and sumNormal.Unit or Vector3.yAxis
 
- local upVector = avgNormal
- local forwardVector = Vector3.zAxis
- if math.abs(upVector:Dot(forwardVector)) > 0.99 then
-  forwardVector = Vector3.xAxis
+ const upVector: Vector3 = avgNormal
+ local forwVector: Vector3 = Vector3.zAxis
+ if math.abs(upVector:Dot(forwVector)) > 0.99 then
+  forwVector = Vector3.xAxis
  end
- local rightVector = upVector:Cross(forwardVector).Unit
- forwardVector = rightVector:Cross(upVector).Unit
+ const rightVector: Vector3 = upVector:Cross(forwVector).Unit
+ forwVector = rightVector:Cross(upVector).Unit
 
- local terrainCFrame = CFrame.fromMatrix(position, rightVector, upVector, -forwardVector)
- local rx, ry, rz = terrainCFrame:ToOrientation()
- local angles = Vector3.new(math.deg(rx), math.deg(ry), math.deg(rz))
+ const terrCFrame: CFrame = CFrame.fromMatrix(position, rightVector, upVector, -forwVector)
+ const rx: number, ry: number, rz: number = terrCFrame:ToOrientation()
+ const angles: Vector3 = Vector3.new(math.deg(rx), math.deg(ry), math.deg(rz))
 
- local function getSlopeAt(x: number, z: number): (number, Vector3, number?)
-  local rayOrigin = Vector3.new(x, rayStartY, z)
-  local rayDirection = Vector3.new(0, -rayDistance, 0)
-  local hit = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+ const function get_slope_at(x: number, z: number): (number, Vector3, number?)
+  const rayOrigin: Vector3 = Vector3.new(x, rStartY, z)
+  const rayDir: Vector3 = Vector3.new(0, -rDist, 0)
+  const hit: {
+   Distance: number,
+   Instance: BasePart,
+   Material: Enum.Material,
+   Normal: Vector3,
+   Position: Vector3
+  }? = workspace:Raycast(rayOrigin, rayDir, params)
 
   if hit then
-   local dot = math.clamp(hit.Normal:Dot(Vector3.yAxis), -1, 1)
-   local slopeDeg = math.deg(math.acos(dot))
+   const dot: number = math.clamp(hit.Normal:Dot(Vector3.yAxis), -1, 1)
+   const slopeDeg: number = math.deg(math.acos(dot))
    return slopeDeg, hit.Normal, hit.Position.Y
   end
 
@@ -138,18 +190,18 @@ function GetTerrain(resolution: number?, ignoreWater: boolean?): TerrainData
   size = size,
   position = position,
   angles = angles,
-  cframe = terrainCFrame,
+  cframe = terrCFrame,
   bounds = {
    min = minBound,
    max = maxBound,
   },
   slopes = {
-   average = totalSlope / sampledCount,
+   average = totalSlope / sampCount,
    min = minSlope,
    max = maxSlope,
-   getSlopeAt = getSlopeAt,
+   get_slope_at = get_slope_at,
   },
-  isEmpty = false,
+  empty = false,
  }
 end
 
