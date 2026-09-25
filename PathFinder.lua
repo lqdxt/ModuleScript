@@ -58,7 +58,7 @@ local function CompEffectPath(path)
   return currentStart .. "/" .. afterAt
  end
 
- error(("unknown root %q in path %q (no Find.SetStart base is set)"):format(bareRootName, path), 3)
+ error(("unknown root %q in path %q (no Find.SetRoot base is set)"):format(bareRootName, path), 3)
 end
 
 local function WaitForChildOfClass(parent, className, timeout)
@@ -247,7 +247,7 @@ function PathFinder.Find(path)
  return current
 end
 
-function PathFinder.SetStart(startPath)
+function PathFinder.SetRoot(startPath)
  if startPath == nil then
   currentStart = nil
   table.clear(pathCache)
