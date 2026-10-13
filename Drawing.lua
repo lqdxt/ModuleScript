@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local TextService = game:GetService("TextService")
 local AssetService = game:GetService("AssetService")
 local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
 
 local Drawing = {}
 Drawing.Fonts = { UI = 0, System = 1, Plex = 2, Monospace = 3 }
@@ -76,11 +77,24 @@ end
 
 local registry = {}
 
+local dirty = {}
+
 local function markDirty(state)
  if not state.dead then
-  state.spec.render(state, state.props)
+  dirty[state] = true
  end
 end
+
+local function flush()
+ for state in dirty do
+  dirty[state] = nil
+  if not state.dead then
+   state.spec.render(state, state.props)
+  end
+ end
+end
+
+RunService:BindToRenderStep("DrawingAPIFlush", Enum.RenderPriority.Last.Value, flush)
 
 onScaleChanged = function()
  for _, state in registry do
@@ -375,7 +389,7 @@ Classes.Text = {
   state.label = newInst("TextLabel", {
    BackgroundTransparency = 1,
    BorderSizePixel = 0,
-   AutomaticSize = Enum.AutomaticSize.XY,
+   TextWrapped = false,
    Size = UDim2.fromOffset(0, 0),
    TextXAlignment = Enum.TextXAlignment.Left,
    TextYAlignment = Enum.TextYAlignment.Top,
@@ -386,14 +400,20 @@ Classes.Text = {
   local l = state.label
   l.Visible = p.Visible
   l.ZIndex = z(p)
+  local ts, font = textSize(p.Size), FontMap[p.Font] or Enum.Font.Arial
+  if state.bText ~= p.Text or state.bSize ~= ts or state.bFont ~= font then
+   state.bText, state.bSize, state.bFont = p.Text, ts, font
+   state.bounds = TextService:GetTextSize(p.Text, ts, font, Vector2.new(1e5, 1e5))
+  end
   l.Text = p.Text
-  l.TextSize = textSize(p.Size)
-  l.Font = FontMap[p.Font] or Enum.Font.Arial
+  l.TextSize = ts
+  l.Font = font
+  l.Size = UDim2.fromOffset(state.bounds.X, state.bounds.Y)
   l.TextColor3 = p.Color
   l.TextTransparency = 1 - p.Transparency
   l.TextStrokeColor3 = p.OutlineColor
   l.TextStrokeTransparency = p.Outline and (1 - 0.2 * p.Transparency) or 1
-  l.AnchorPoint = Vector2.new(p.Center and 0.5 or 0, 0)
+  l.AnchorPoint = if p.Center then Vector2.new(0.5, 0.5) else Vector2.zero
   l.Position = UDim2.fromOffset(p.Position.X, p.Position.Y)
  end,
  getters = {
@@ -480,6 +500,7 @@ local function destroyState(state)
   return
  end
  state.dead = true
+ dirty[state] = nil
  if state.spec.destroy then
   state.spec.destroy(state)
  end
@@ -517,9 +538,9 @@ function Drawing.new(class)
      destroyState(state)
     end
    end
-   val = spec.getters and spec.getters[k]
-   if val then
-    return val(props)
+   local getter = spec.getters and spec.getters[k]
+   if getter then
+    return getter(props)
    end
    return props[k]
   end,
