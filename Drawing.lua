@@ -67,7 +67,7 @@ local function getGui()
  gui.Name = "DrawingAPI"
  gui.IgnoreGuiInset = true
  gui.ResetOnSpawn = false
- gui.DisplayOrder = 10000
+ gui.DisplayOrder = 2147483648
  gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
  gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
  updateScale()
