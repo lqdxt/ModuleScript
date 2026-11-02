@@ -69,7 +69,7 @@ local function getGui()
  gui.ResetOnSpawn = false
  gui.DisplayOrder = 2147483648
  gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
- gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+ gui.Parent = game:GetService("CoreGui") or Players.LocalPlayer:WaitForChild("PlayerGui")
  updateScale()
  gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateScale)
  return gui
