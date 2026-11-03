@@ -19,7 +19,7 @@ local function PickChar(chartype: string): string
   if ok then
    return result
   else
-   return "�"
+   return ""
   end
  end
  return string.char(math.random(0x21, 0x7e))
