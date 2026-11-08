@@ -20,13 +20,14 @@ type LoopData = {
  callbacks: { [string]: Callback },
  meta: { [string]: CallbackMeta },
  order: { string },
- orderCache: { string }?,
+ ordercache: { string }?,
  connection: RBXScriptConnection?,
  signal: RBXScriptSignal?,
  clientonly: boolean,
  firing: boolean,
+ busy: { [string]: number },
  generation: number,
- pendingFire: any?,
+ pendingfire: any?,
 }
 
 type PlanEntry = {
@@ -40,11 +41,12 @@ local LoopManager = {}
 LoopManager.ProfilingEnabled = true
 LoopManager.WarnOnOverwrite = false
 LoopManager.WarnOnClientOnlyServerBind = false
-LoopManager.YieldCheckEnabled = false
 LoopManager.QueueReentrantFires = false
+LoopManager.AllowOverlap = false
 
 local loops: { [string]: LoopData } = {}
 local running = false
+local runCounter = 0
 local errorHandler: ((loopName: string, name: string, err: any) -> ())? = nil
 
 local function SanitizePriority(priority: any): number
@@ -92,6 +94,7 @@ local function unbind(loopName: string, name: string)
 
  loop.callbacks[name] = nil
  loop.meta[name] = nil
+ loop.busy[name] = nil
 
  local order = loop.order
  local index = table.find(order, name)
@@ -99,7 +102,7 @@ local function unbind(loopName: string, name: string)
   table.remove(order, index)
  end
 
- loop.orderCache = nil
+ loop.ordercache = nil
 end
 
 local function bind(loopName: string, name: string, func: Callback, options: BindOptions?)
@@ -157,28 +160,41 @@ local function bind(loopName: string, name: string, func: Callback, options: Bin
 
  if isNew then
   table.insert(loop.order, FindInsertIndex(loop.order, loop.meta, info.Priority), name)
-  loop.orderCache = nil
+  loop.ordercache = nil
  elseif info.Priority ~= oldPriority then
   local index = table.find(loop.order, name)
   if index then
    table.remove(loop.order, index)
   end
   table.insert(loop.order, FindInsertIndex(loop.order, loop.meta, info.Priority), name)
-  loop.orderCache = nil
+  loop.ordercache = nil
+ end
+end
+
+local function RunCallback(loop: LoopData, loopName: string, name: string, func: Callback, token: number, ...: any)
+ local ok, err = pcall(func, ...)
+
+ if loop.busy[name] == token then
+  loop.busy[name] = nil
+ end
+
+ if not ok then
+  ReportError(loopName, name, err)
  end
 end
 
 local function FireInner(loop: LoopData, loopName: string, generation: number, ...: any)
- local names = loop.orderCache
+ local names = loop.ordercache
  if not names then
   names = table.clone(loop.order)
-  loop.orderCache = names
+  loop.ordercache = names
  end
 
  local callbacks = loop.callbacks
  local metaByName = loop.meta
  local profiling = LoopManager.ProfilingEnabled
- local checkYields = LoopManager.YieldCheckEnabled
+ local allowOverlap = LoopManager.AllowOverlap
+ local busy = loop.busy
 
  local plan = table.create(#names) :: { PlanEntry }
  local planCount = 0
@@ -214,42 +230,20 @@ local function FireInner(loop: LoopData, loopName: string, generation: number, .
    local name = entry.name
    local func = entry.func
 
-   if profiling then
-    debug.profilebegin(name)
-   end
+   if allowOverlap or busy[name] == nil then
+    runCounter += 1
+    local token = runCounter
+    busy[name] = token
 
-   local ok, err
-
-   if checkYields then
-    local co = coroutine.create(func)
-    ok, err = coroutine.resume(co, ...)
-
-    if coroutine.status(co) ~= "dead" then
-     warn(string.format(
-      "[LoopManager] Callback '%s' in '%s' yielded! Avoid yielding inside frame loops. The rest of this invocation has been aborted.",
-      name,
-      loopName
-     ))
-     local closed, closeErr = coroutine.close(co)
-     if not closed then
-      warn(string.format(
-       "[LoopManager] Failed to close yielded coroutine for '%s' in '%s': %s",
-       name,
-       loopName,
-       tostring(closeErr)
-      ))
-     end
+    if profiling then
+     debug.profilebegin(name)
     end
-   else
-    ok, err = pcall(func, ...)
-   end
 
-   if profiling then
-    debug.profileend()
-   end
+    task.spawn(RunCallback, loop, loopName, name, func, token, ...)
 
-   if not ok then
-    ReportError(loopName, name, err)
+    if profiling then
+     debug.profileend()
+    end
    end
 
    if loop.generation == generation and loop.callbacks[name] == func and meta.Once then
@@ -267,13 +261,13 @@ local function Fire(loopName: string, ...: any)
 
  if loop.firing then
   if LoopManager.QueueReentrantFires then
-   if not loop.pendingFire then
-    loop.pendingFire = {}
+   if not loop.pendingfire then
+    loop.pendingfire = {}
    end
-   table.insert(loop.pendingFire, table.pack(...))
+   table.insert(loop.pendingfire, table.pack(...))
   else
    warn(string.format(
-    "[LoopManager] '%s' fired again before its previous tick finished (a bound callback likely yielded without YieldCheckEnabled); skipping this tick. Set LoopManager.QueueReentrantFires = true to coalesce reentrant fires.",
+    "[LoopManager] '%s' fired again before its previous tick finished (a bound callback called Fire on its own loop); skipping this tick. Set LoopManager.QueueReentrantFires = true to coalesce reentrant fires.",
     loopName
    ))
   end
@@ -291,11 +285,11 @@ local function Fire(loopName: string, ...: any)
   end
 
   local nextArgs = nil
-  if loop.pendingFire and #loop.pendingFire > 0 then
-   nextArgs = table.remove(loop.pendingFire, 1)
+  if loop.pendingfire and #loop.pendingfire > 0 then
+   nextArgs = table.remove(loop.pendingfire, 1)
   else
    nextArgs = nil
-   loop.pendingFire = nil
+   loop.pendingfire = nil
   end
   args = nextArgs
  until args == nil
@@ -336,13 +330,14 @@ function LoopManager.CreateLoop(loopName: string, signal: RBXScriptSignal?, clie
   callbacks = {},
   meta = {},
   order = {},
-  orderCache = nil,
+  ordercache = nil,
   connection = nil,
   signal = signal,
   clientonly = clientonly == true,
   firing = false,
+  busy = {},
   generation = 0,
-  pendingFire = nil,
+  pendingfire = nil,
  }
 
  if running then
@@ -382,7 +377,7 @@ function LoopManager.DestroyLoop(loopName: string): boolean
  end
 
  loops[loopName] = nil
- loop.pendingFire = nil
+ loop.pendingfire = nil
  loop.generation += 1
 
  if loop.connection then
@@ -519,8 +514,9 @@ function LoopManager.Reset()
   loop.callbacks = {}
   loop.meta = {}
   loop.order = {}
-  loop.orderCache = nil
-  loop.pendingFire = nil
+  loop.busy = {}
+  loop.ordercache = nil
+  loop.pendingfire = nil
  end
 end
 
