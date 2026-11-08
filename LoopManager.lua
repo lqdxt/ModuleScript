@@ -1,9 +1,4 @@
 --!strict
---[[
-  ModuleScript: LoopManager
-  require it: require(path.LoopManager)
-  or loadstring()
-]]
 local RunService = game:GetService("RunService")
 local IsClient = RunService:IsClient()
 
